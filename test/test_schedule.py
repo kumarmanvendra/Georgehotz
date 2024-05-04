@@ -32,7 +32,7 @@ def check_schedule(t:Union[Tensor, List[Tensor]], allowed:int, to_prerealize:Opt
     for i, s in enumerate(sched):
       print("kernel", i+1)
       for op in s.ast: print_tree(op)
-  assert len(sched) == allowed
+  assert len(sched) == allowed, f"{len(sched)}, {allowed}"
   # test the (non loadops) ops linearize
   for s in sched:
     if s.ast[0].op in LoadOps: continue
@@ -679,6 +679,113 @@ class TestSchedule(unittest.TestCase):
     # c = a + 2
     # sched = check_schedule([b, c], 4)
     # doesn't store either in half because it doesn't chase
+
+  def test_batchnorm_train_backward_fusion(self):
+    with Tensor.train():
+      x = Tensor.empty((2, 16, 8, 8)).contiguous()
+      bn = nn.BatchNorm2d(16)
+      bn.weight.requires_grad = bn.bias.requires_grad = x.requires_grad = True
+      fw = bn(x).contiguous_backward().relu().contiguous()
+      fw.sum().backward()
+      # we want to minimize number of passes over buffers of same size as x
+      # start: 12 kernels (some extraneous from constructing this test case)
+      # easy case: merge 4 reduces in backward into 1
+      # double reduce case: merge stat calculations from 2 to 1 (be careful of long reduces!)
+      # sum(x - \bar{x}): one kernel just calculates this, can be eliminated
+      # pre-expand fusion: is it fast? -2 kernels possible, 1 fw, 1 bw
+      # merge reduce into previous conv: -2 kernels on top of the above. requires big linearizer change.
+      # ideal case: the foward + backward pass is just 3 convs and some small reduces!
+      check_schedule([x.grad, bn.weight.grad, bn.bias.grad, fw], 9)
+
+  def test_parallel_reduce_fusion(self):
+    x = Tensor.empty(16, 16)
+    y = Tensor.empty(16, 16)
+    z = Tensor.empty(16, 16)
+    a = Tensor.empty(1, 16)
+    b = Tensor.empty(1, 16)
+
+    # we want to fuse reduces where the inputs of "significant" size of one reduce
+    # are a superset of the significant inputs of another reduce
+
+    # === -4 memory passes ===
+
+    # should fuse reduces that share common input, indexing on larger inputs
+    check_schedule([(x + a).sum(), (x + b).sum()], 1)
+
+    # same as above, except one of the sums has 2 big buffers
+    check_schedule([(x + y + a).sum(), (x + b).sum()], 1)
+
+    # same as above, except both sums have 2 big buffers
+    check_schedule([(x + y + a).sum(), (x + y + b).sum()], 1)
+
+    # same as above, except with 3 sums
+    # do not necessarily require the (x, a) (x, b) (a, b) case
+    check_schedule([(x + y + a).sum(), (x + b).sum(), (y + b).sum()], 1)
+
+    # same as above, except with different late ASTs
+    check_schedule([(x + y + a).sum() * 2, (x + b).sum() * 3], 1)
+
+    # for now, we only want to do this fusion when no significant inputs are added
+    # this is because adding significant inputs is not free when doing gemms, since
+    # there is limited L1 cache space. it is probably OK to fuse when there is at most
+    # one expand axis.
+    check_schedule([(x + y).sum(), (x + z).sum()], 2)
+
+    # pick someone to fuse into if there is ambiguity
+    check_schedule([(x + y).sum(), (x + z).sum(), (x + a).sum()], 2)
+
+    # don't fuse if shapetrackers do not match
+    check_schedule([(x + a).sum(), (x.permute(1, 0) + b).sum()], 2)
+
+    # don't fuse if sums do not match
+    check_schedule([(x + a).sum(axis=0), (x + b).sum(axis=1)], 2)
+    check_schedule([(x + a).sum(axis=0), (x + b).sum()], 2)
+
+    # maybe don't fuse if is 2-axis expand (gemm) and the early asts do not match?
+    # (because there might be too many accumulators)
+
+  @unittest.skip("not useful for bn backward")
+  def test_parallel_r_e_fusion(self):
+    x = Tensor.empty(16, 16)
+    y = Tensor.empty(16, 16)
+    z = Tensor.empty(16, 16)
+    a = Tensor.empty(1, 16)
+    b = Tensor.empty(1, 16)
+
+    # do parallel fusion also for elementwise
+    check_schedule([(x + a).sum(), (x * b)], 1)
+
+    # do this also for *subtrees* of elementwise, when it will save memory bandwidth
+    stat = (x + z + a).sum(axis=0, keepdim=True)
+    check_schedule([stat, ((x + z + b) * stat + y)], 1)
+
+    # don't steal if it doesn't reduce mem bw
+    stat = (x + a).sum(axis=0, keepdim=True)
+    check_schedule([stat, ((x + b) * stat + y)], 2)
+
+    # don't fuse if shapetrackers do not match
+    check_schedule([(x + a).sum(), (x.permute(1, 0) + b)], 2)
+
+  def test_preconv_e_fusion(self):
+    x = Tensor.empty(16, 16)
+    y = Tensor.empty(16, 16)
+    z = Tensor.empty(16, 16)
+    a = Tensor.empty(1, 16)
+    conv = nn.Conv2d(16, 16, 3)
+    conv.weight = Tensor.empty(conv.weight.shape)
+    conv.bias = Tensor.empty(conv.bias.shape)
+
+    # === -4 memory passes (2 dependent on fusing conv(a + b)) ===
+
+    # fuse when the input has 1 big buffer
+    check_schedule([conv(x + a)], 1)
+
+    # fuse when the input has 2 big buffer
+    # very annoying that bn backward needs to fuse 2 big buffer
+    check_schedule([conv(x + y + a)], 1)
+
+    # (for now) don't fuse when the input has 3 big buffer
+    check_schedule([conv(x + y + z)], 2)
 
   def test_reduce_simple_chase(self):
     a = Tensor.empty(4, 4, 4)
