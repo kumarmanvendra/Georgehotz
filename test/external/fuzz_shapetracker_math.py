@@ -3,6 +3,7 @@ from typing import Tuple
 from tqdm import trange
 from tinygrad.helpers import getenv, DEBUG, colored
 from tinygrad.shape.shapetracker import ShapeTracker
+from test.external.mergeable import simplify2
 from test.external.fuzz_shapetracker import shapetracker_ops
 from test.external.fuzz_shapetracker import do_permute, do_reshape_split_one, do_reshape_combine_two, do_flip, do_pad
 from test.unit.test_shapetracker_math import st_equal, MultiShapeTracker
@@ -32,6 +33,9 @@ if __name__ == "__main__":
   total = getenv("CNT", 1000)
   for fuzz in [globals()[f'fuzz_{x}'] for x in getenv("FUZZ", "invert,plus").split(",")]:
     same_but_neq = 0
+    ref_win = 0
+    ref_loss = 0
+    multiview = 0
     for _ in trange(total, desc=f"{fuzz}"):
       st1, st2 = fuzz()
       eq = st_equal(st1, st2)
@@ -40,9 +44,28 @@ if __name__ == "__main__":
         print(st1.simplify())
         print(st2.simplify())
         same_but_neq += 1
+      if getenv("CHECK_MV"):
+        prod = st2.simplify()
+        ref = simplify2(st2)
+        assert(st_equal(prod, ref))
+        if len(prod.views) > len(ref.views):
+          print(colored("prod simplify worse than ref", "red"))
+          print(f"prod = {prod}")
+          print(f"ref =  {ref}")
+          ref_win += 1
+        if len(prod.views) < len(ref.views):
+          print(colored("prod simplify better than ref ", "green"))
+          print(f"prod =  {prod}")
+          print(f"ref = {ref}")
+          ref_loss += 1
+        if len(prod.views) > 1:
+          multiview += 1
       if DEBUG >= 1:
         print(f"EXP: {st1}")
         print(f"GOT: {st2}")
         print(colored("****", "green" if eq else "red"))
       if not eq: exit(0)
     if getenv("CHECK_NEQ"): print(f"same but unequal {(same_but_neq/total)*100:.2f}%")
+    if getenv("CHECK_MV"):
+      print(f"prod worse than ref {(ref_win/multiview)*100:.2f}%")
+      print(f"prod better than ref {(ref_loss/multiview)*100:.2f}%")
