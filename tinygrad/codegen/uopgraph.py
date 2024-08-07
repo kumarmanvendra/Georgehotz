@@ -419,6 +419,7 @@ def no_vectorized_alu(alu):
 def create_gate(root:UOp) -> Optional[UOp]:
   @functools.lru_cache(None)
   def _gate_srcs(u:UOp, gate:UOp) -> UOp:
+    if u.op is UOps.BARRIER: return u
     if u.op is UOps.LOAD and u.src[-1].op is UOps.BARRIER: return UOp(u.op, u.dtype, u.src[:-1]+(UOp(UOps.IF, None, (gate, u.src[-1])),), u.arg)
     return u if (replace_source:=tuple(_gate_srcs(x, gate) for x in u.src)) == u.src else UOp(u.op, u.dtype, replace_source, u.arg)
   return None if len(root.src) == 3 or (ret:=_gate_srcs(root, root.src[3])) is root else ret
@@ -516,6 +517,22 @@ class UOpGraph:
     # NOTE: relinearizering should be okay
     #assert self._uops is None, "already linearized"
 
+    # replace UOps.STORE gate with an IF block
+    # @functools.lru_cache(None)
+    # def _replace_gates(u:UOp, gate:Optional[UOp]=None) -> UOp:
+    #   if u.op is UOps.STORE and len(u.src) >= 4: gate = u.src[3]
+    #   addif = u.op is UOps.LOAD and u.src[-1].op is UOps.BARRIER
+    #   if (replace_source:=tuple(_replace_gates(x, None if addif else gate) for x in u.src)) != u.src:
+    #     u = UOp(u.op, u.dtype, replace_source, u.arg)
+    #   if addif and gate is not None:
+    #     return UOp(u.op, u.dtype, u.src[:-1]+(UOp(UOps.IF, None, (gate, u.src[-1])),), u.arg)
+    #   return u
+    # sink_srcs = list(self.sink.src)
+    # for i, s in enumerate(sink_srcs):
+    #   if s.op is UOps.STORE and len(s.src) == 4 and (rw:=_replace_gates(s, s.src[3])) != s:
+    #     sink_srcs[i] = UOp(rw.op, rw.dtype, rw.src, rw.arg)
+    # sink = UOp(UOps.SINK, None, tuple(sink_srcs))
+
     # do graph rewrite
     sink = graph_rewrite(self.sink, self.folder)
 
@@ -541,13 +558,14 @@ class UOpGraph:
 
     # scope children impact the toposort and END* insertion
     scope_children = {p:get_recursive_children(p, END_FOR_UOP[p.op][0]) for p in reversed(in_degree) if p.op in END_FOR_UOP}
+    range_phi = {r:tuple(sorted([p for p in scope_children[r] if p.op is UOps.PHI])) for r in scope_children if r.op is UOps.RANGE and r.arg[1]}
 
     queue:List[Tuple[int, UOp]] = []
     def push(u:UOp):
       priority = 0
       # prefer uops that are loop children
       for l, ss in scope_children.items():
-        if l.op is UOps.RANGE and u in ss: priority -= l.arg[0]*1000 + l.arg[1]
+        if l.op is UOps.RANGE and u in ss: priority -= (l.arg[0]+1) + 1000*l.arg[1] # TODO: cleanup
       heapq.heappush(queue, (priority, u))
 
     for u in children:
@@ -555,19 +573,36 @@ class UOpGraph:
 
     scope_end: Dict[UOp, UOp] = {}
     self._uops = []
+    scopes: Dict[UOps, List[UOp]] = {}
     while queue:
       p,x = heapq.heappop(queue)
-      if DEBUG >= 7: print(p,x)
+      if DEBUG >= 7: print(p,x.op,x.arg)
+      
+      child_of_scopes=[u for u,ss in scope_children.items() if x in ss]
+      child_of_reduces=[u for u in child_of_scopes if u.op is UOps.RANGE and u.arg[1]]
+      if len(child_of_reduces) > 0: assert all(len(range_phi[s]) == len(range_phi[child_of_reduces[0]]) and all(v in range_phi[child_of_reduces[0]] for v in range_phi[s]) for s in child_of_reduces), "scopes don't map to the same phi"
       if x in scope_children: scope_end[x] = x
-      if x.op is UOps.DEFINE_ACC:
-        idx = min([self._uops.index(l) for l in x.src if l.op is UOps.RANGE])
-        self._uops.insert(idx, x)
+      elif x.op is UOps.DEFINE_ACC: assert all(s in scopes[range_phi[s]] for s in x.src if s.op is UOps.RANGE), "not all ranges in stack!!"
+      elif any(s not in self._uops for s in x.src) and len(child_of_reduces) == 0:
+        heapq.heappush(queue, (p+1, x))
+        continue
+
+      if x.op is UOps.RANGE and x.arg[1]: scopes[range_phi[x]] = scopes[range_phi[x]] + [x] if (range_phi[x] in scopes) else [x]
+      elif x.op is UOps.DEFINE_ACC: scopes[p:=range_phi[x.src[1]]].insert(min(scopes[p].index(s) for s in x.src if s.op is UOps.RANGE),x)
+      elif len(child_of_reduces) > 0: scopes[range_phi[child_of_reduces[0]]].append(x)
       else: self._uops.append(x)
-      for u, ss in scope_children.items():
-        if x in ss:
-          ss.remove(x)
-          if len(ss) == 0: scope_end[u] = x
-      for u in children[x]:
+
+      for u in child_of_scopes:
+        scope_children[u].remove(x)
+        if len(scope_children[u]) == 0: scope_end[u] = x
+      if len(child_of_reduces) > 0:
+        if all(len(scope_children[s]) == 0 for s in child_of_reduces):
+          for u in child_of_reduces:
+            scope_end[u] = x
+            self._uops = self._uops + scopes[range_phi[u]]
+            scopes[range_phi[u]] = []
+
+      for u in reversed(children[x]):
         in_degree[u] -= 1
         if in_degree[u] == 0: push(u)
 
@@ -583,8 +618,10 @@ class UOpGraph:
         assert len(bad_ops) == 0, f"bad UOps left in list: {bad_ops}"
         # TODO: this should be enabled, and the valid clause should be removed
         # NOTE: multiple identical stores to DEFINE_LOCAL is okay
-        assert len(all_stores := [x.src[0:2]+x.src[3:] for x in self._uops if x.op is UOps.STORE and x.src[0].op is not UOps.DEFINE_LOCAL]) \
-          == len(dedup(all_stores)), "repeated stores in uops"
+        # NOTE: for PTX we have to recurse down all ALUs and CASTs
+        def _islocalbuf(u: UOp): return u.op is UOps.DEFINE_LOCAL or any(_islocalbuf(x) for x in u.src if u.op in [UOps.ALU, UOps.CAST])
+        assert len(all_stores := [x.src[0:2]+x.src[3:] for x in self._uops if x.op is UOps.STORE and not _islocalbuf(x.src[0])]) \
+            == len(dedup(all_stores)), "repeated stores in uops: "
       except AssertionError as e:
         self.print()
         if not CI: self.graph()
