@@ -6,12 +6,15 @@ from tinygrad.dtype import dtypes, PtrDType, ImageDType, DType
 from tinygrad.ops import UnaryOps, BinaryOps, exec_alu, UOp, NOp, UOps, UPat, PatternMatcher, END_FOR_UOP, graph_rewrite, type_verify, print_uops
 from tinygrad.helpers import DEBUG, getenv, flatten, dedup, TRANSCENDENTAL, prod, CI, all_same, partition
 from tinygrad.codegen.transcendental import xexp2, xlog2, xsin, TRANSCENDENTAL_SUPPORTED_DTYPES
+from tinygrad.renderer.cstyle import CUDARenderer
+from tinygrad.renderer.assembly import PTXRenderer
 if TYPE_CHECKING: from tinygrad.renderer import Renderer
 
 # ***** float4/image store handling *****
 
 def fold_expanded(ex, buf):
-  if buf.dtype != PtrDType(dtypes.float) and buf.dtype != PtrDType(dtypes.half) and not isinstance(buf.dtype, ImageDType): return None
+  if buf.dtype not in [PtrDType(x) for x in (dtypes.fp8_e4m3, dtypes.fp8_e5m2, dtypes.float, dtypes.half)] and not isinstance(buf.dtype, ImageDType):
+    return None
   new_srcs = dedup(list(ex.src))
   old_new_srcs = new_srcs[:]
   is_load, is_image = new_srcs[0].op is UOps.LOAD, isinstance(buf.dtype, ImageDType)
@@ -155,6 +158,22 @@ def div_folding(x:UOp, c:int) -> Optional[UOp]:
 def transcendental_folding(ops):
   return PatternMatcher([(UPat(UOps.ALU, dtype=TRANSCENDENTAL_SUPPORTED_DTYPES, src=(UPat(name="d"),), arg=k), cast(Callable, v))
                          for k,v in ((UnaryOps.EXP2, xexp2), (UnaryOps.LOG2, xlog2), (UnaryOps.SIN, xsin)) if k not in ops])
+
+# ***** fp8 arithmetic *****
+# CUDA does not handle fp8 arithmetic natively. As a workaround, we cast to float, do arithmetic and cast back.
+@functools.lru_cache(None)
+def fp8_arithmetic():
+  dts = {dtypes.fp8_e4m3, dtypes.fp8_e5m2}
+  def rewrite(args, res):
+    dt = dtypes.float if res.arg not in (BinaryOps.CMPLT, BinaryOps.CMPNE) else dtypes.bool
+    return UOp(UOps.ALU, dt, cast(Tuple[UOp],(arg.cast(dtypes.float) for arg in args)), res.arg).cast(res.dtype)
+  def srcs(n): return tuple(UPat(name=f"x{i}", dtype=dts) for i in range(n))
+  # note: match for dtypes.bool for comparison ops
+  return PatternMatcher([
+    (UPat(UOps.ALU, dtype=dts, name="y",src=(srcs(1))), lambda x0, y: rewrite((x0,),y)),
+    (UPat(UOps.ALU, dtype=dts.union({dtypes.bool}), name="y",src=(srcs(2))), lambda x0, x1, y: rewrite((x0, x1), y)),
+    (UPat(UOps.ALU, dtype=dts, name="y",src=(srcs(3))), lambda x0, x1, x2, y: rewrite((x0, x1, x2), y))
+  ])
 
 # ***** threefry *****
 
@@ -494,7 +513,8 @@ linearize_cnt = 0
 def full_graph_rewrite(sink:UOp, opts:Optional[Renderer]=None) -> UOp:
   global linearize_cnt, acc_number
   assert sink.op is UOps.SINK, f"sink isn't sink, it's {sink.op}"
-  folder = constant_folder + transcendental_folding(tuple() if TRANSCENDENTAL >= 2 or opts is None else tuple(opts.code_for_op.keys()))
+  folder = constant_folder + transcendental_folding(tuple() if TRANSCENDENTAL >= 2 or opts is None else tuple(opts.code_for_op.keys()))\
+      + (fp8_arithmetic() if isinstance(opts, (CUDARenderer, PTXRenderer)) else PatternMatcher([]))
 
   # do graph rewrite
   acc_number = 0
