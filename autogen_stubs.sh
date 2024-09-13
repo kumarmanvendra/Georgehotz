@@ -200,11 +200,14 @@ generate_io_uring() {
 }
 
 generate_libc() {
+  curl https://opensource.apple.com/source/Libc/Libc-583/include/libkern/OSCacheControl.h -o /tmp/OSCacheControl.h
+
   clang2py -k cdefstum \
     $(dpkg -L libc6-dev | grep sys/mman.h) \
     $(dpkg -L libc6-dev | grep sys/syscall.h) \
     /usr/include/elf.h \
     /usr/include/unistd.h \
+    /tmp/OSCacheControl.h \
     -o $BASE/libc.py
 
   sed -i "s\import ctypes\import ctypes, ctypes.util, os\g" $BASE/libc.py
