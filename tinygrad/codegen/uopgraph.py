@@ -9,6 +9,20 @@ from tinygrad.helpers import DEBUG, getenv, flatten, dedup, TRANSCENDENTAL, AMX,
 from tinygrad.codegen.transcendental import xexp2, xlog2, xsin, TRANSCENDENTAL_SUPPORTED_DTYPES
 if TYPE_CHECKING: from tinygrad.renderer import Renderer
 
+# ***** basics *****
+
+def no_vectorized_alu(alu):
+  if alu.dtype.count == 1: return None
+  alus = tuple(UOp(alu.op, alu.dtype.scalar(),
+                   tuple(UOp(UOps.GEP, s.dtype.scalar(), (s,), (i,)) if alu.op is not UOps.REDUCE or j == 0 else s for j,s in enumerate(alu.src)),
+                   alu.arg) for i in range(alu.dtype.count))
+  return UOp(UOps.VECTORIZE, alu.dtype, alus)
+
+vconst_vgep = PatternMatcher([
+  (UPat(UOps.VECTORIZE, src=UPat(UOps.CONST), name="vec"), lambda vec: UOp.const(vec.dtype, tuple(x.arg for x in vec.src))),
+  (UPat(UOps.VECTORIZE, src=UPat(UOps.GEP, src=(UPat(name="x"),)), name="vec"), lambda vec,x: x.gep(tuple(y.arg[0] for y in vec.src))),
+])
+
 # ***** float4/image store handling *****
 
 def fold_expanded(ex, buf):
@@ -73,6 +87,43 @@ def fix_unfoldable_image_load(load:UOp, buf:UOp):
 float4_folding = PatternMatcher([
   (UPat(UOps.VECTORIZE, src=UPat(UOps.LOAD, src=(UPat.var("buf"), UPat()), allow_any_len=True), name="ex"), fold_expanded),
   (UPat((UOps.BARRIER, UOps.SINK), src=UPat(UOps.STORE, src=(UPat.var("buf"), UPat(), UPat()), allow_any_len=True), name="ex"), fold_expanded),
+])
+
+# *** new load folders ***
+
+def split_load_on_gate(load, buf, idx, var, gate):
+  gate_srcs = gate.src if gate.op is UOps.VECTORIZE else gate.arg
+  splits = dedup(gate_srcs)
+  if len(splits) == 1: return
+  fv: List[Optional[UOp]] = [None]*load.dtype.count
+  for s in splits:
+    idxs = tuple(i for i,g in enumerate(gate_srcs) if g is s)
+    if s is True: ld = UOp.load(buf, idx.gep(idxs), dtype=load.dtype.scalar().vec(len(idxs)))
+    elif s is False: ld = var.gep(idxs)
+    else:
+      # complex gate
+      ld = UOp.load(buf, idx.gep(idxs), var.gep(idxs), s.broadcast(len(idxs)), dtype=load.dtype.scalar().vec(len(idxs)))
+    for i,tidx in enumerate(idxs): fv[tidx] = ld.gep(i)
+  return UOp(UOps.VECTORIZE, load.dtype, tuple(cast(List[UOp], fv)))
+
+def dedup_load(load:UOp, buf:UOp, base:UOp, idx:UOp, var:Optional[UOp]=None, gate:Optional[UOp]=None):
+  if len(dedup(idx.arg)) == len(idx.arg): return None
+  new_idxs = tuple(sorted(dedup(idx.arg)))
+  mgate = (UOp.const(var.dtype.scalar().vec(len(new_idxs)), var.arg), gate.broadcast(len(new_idxs))) \
+    if gate is not None and var is not None else tuple()
+  ld = UOp(UOps.LOAD, load.dtype.scalar().vec(len(new_idxs)),
+           (buf, base.broadcast(len(new_idxs))+UOp.const(idx.dtype.scalar().vec(len(new_idxs)), new_idxs))+mgate)
+  return ld.gep(tuple(new_idxs.index(x) for x in idx.arg))
+
+load_store_folder = vconst_vgep+PatternMatcher([
+  (UPat(UOps.ALU, src=[UPat(UOps.VCONST), UPat()], arg=BinaryOps.CMPLT, name="alu"), no_vectorized_alu),
+  (UPat(UOps.ALU, src=(UPat((UOps.VECTORIZE,UOps.VCONST)),)*2, arg=BinaryOps.AND, name="alu"), no_vectorized_alu),
+  # idx VCONST simplificiations
+  (UPat.load(UPat.var("buf"), UPat(UOps.VECTORIZE, src=UPat(name="base")) + UPat(UOps.VCONST, name="idx"), name="load"), dedup_load),
+  (UPat.load(UPat.var("buf"), UPat(UOps.VECTORIZE, src=UPat(name="base")) + UPat(UOps.VCONST, name="idx"),
+             UPat(UOps.CONST, name="var"), UPat(UOps.VECTORIZE, src=UPat(name="gate")), name="load"), dedup_load),
+  # split load based on gate
+  (UPat.load(UPat.var("buf"), UPat.var("idx"), UPat.var("var"), UPat((UOps.VECTORIZE, UOps.VCONST), name='gate'), name="load"), split_load_on_gate),
 ])
 
 # ***** mod *****
@@ -563,13 +614,6 @@ def do_contract(con:UOp):
     idxs += [_expand_arg_to_idx(ex.arg, {**rpk, **lrpk}) for lrpk in _choices_from_args(con.arg)]
   return UOp(UOps.EXPAND, con.dtype, (ex.src[0].gep(tuple(idxs)),), new_ex_args)
 
-def no_vectorized_alu(alu):
-  if alu.dtype.count == 1: return None
-  alus = tuple(UOp(alu.op, alu.dtype.scalar(),
-                   tuple(UOp(UOps.GEP, s.dtype.scalar(), (s,), (i,)) if alu.op is not UOps.REDUCE or j == 0 else s for j,s in enumerate(alu.src)),
-                   alu.arg) for i in range(alu.dtype.count))
-  return UOp(UOps.VECTORIZE, alu.dtype, alus)
-
 def create_gate(root:UOp) -> Optional[UOp]:
   @functools.lru_cache(None)
   def _gate_srcs(u:UOp, gate:UOp) -> UOp:
@@ -579,9 +623,7 @@ def create_gate(root:UOp) -> Optional[UOp]:
     return u if (replace_source:=tuple(_gate_srcs(x, gate) for x in u.src)) == u.src else UOp(u.op, u.dtype, replace_source, u.arg)
   return None if len(root.src) == 3 or (ret:=_gate_srcs(root, root.src[3])) is root else ret
 
-expander = PatternMatcher([
-  (UPat(UOps.VECTORIZE, src=UPat(UOps.CONST), name="vec"), lambda vec: UOp.const(vec.dtype, tuple(x.arg for x in vec.src))),
-  (UPat(UOps.VECTORIZE, src=UPat(UOps.GEP, src=(UPat(name="x"),)), name="vec"), lambda vec,x: x.gep(tuple(y.arg[0] for y in vec.src))),
+expander = vconst_vgep+PatternMatcher([
   # create gate MUST BE BEFORE expander
   (UPat(UOps.STORE, name="root"), create_gate),
   # double expand
@@ -687,8 +729,8 @@ def full_graph_rewrite(sink:UOp, opts:Optional[Renderer]=None) -> UOp:
   linearize_cnt += 1
   if linearize_cnt != (de:=getenv("DEBUG_EXPAND", 0)) and de != -1:
     sink = graph_rewrite(sink, folder+expander)
+    sink = graph_rewrite(sink, folder+load_store_folder+just_reduce)
     if getenv("DO_REDUCE", 1):
-      sink = graph_rewrite(sink, folder+just_reduce)
       sink = graph_rewrite(sink, folder+(devectorize+float4_folding if opts is not None and opts.supports_float4 else devectorize))
       sink = graph_rewrite(sink, folder+reducer)
 
