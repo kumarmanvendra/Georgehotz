@@ -130,7 +130,7 @@ class CStyleLanguage(Renderer):
         kk(f"if ({r[src[3]]}) {{ {rendered_store} }}" if len(src) > 3 and src[3].op is not UOps.IF else rendered_store)
       else:
         if uop is UOps.RANGE:
-          kk(f"for (int {(expr := ssa('ridx',u))} = {r[src[0]]}; {expr} < {r[src[1]]}; {expr}++) {{")
+          kk(f"for ({self.render_dtype(dtype)} {(expr := ssa('ridx',u))} = {r[src[0]]}; {expr} < {r[src[1]]}; {expr}++) {{")
           depth += 1
         elif uop is UOps.ALU:
           # remove parens if ALU types are the same. TODO: can do more here
@@ -143,7 +143,7 @@ class CStyleLanguage(Renderer):
           if child_count[u] <= 1 and args is not BinaryOps.MAX and not getenv("EXPAND_SSA"): r[u] = val
           else: kk(f"{self.render_dtype(dtype)} {ssa('alu',u)} = {val};")
         elif uop is UOps.SPECIAL:
-          kk(f"int {args[0]} = {self.code_for_workitem[args[0][0]](args[0][-1])}; /* {args[1]} */")
+          kk(f"{self.render_dtype(dtype)} {args[0]} = {self.code_for_workitem[args[0][0]](args[0][-1])}; /* {args[1]} */")
           r[u] = args[0]
         elif uop is UOps.DEFINE_VAR:
           assert args[0] not in seen_vars, f"duplicate variable {args[0]}"
