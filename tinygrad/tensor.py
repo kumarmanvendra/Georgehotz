@@ -8,7 +8,7 @@ import numpy as np
 
 from tinygrad.dtype import DType, DTypeLike, dtypes, ImageDType, ConstType, least_upper_float, least_upper_dtype, sum_acc_dtype, to_dtype
 from tinygrad.helpers import argfix, make_pair, flatten, prod, all_int, round_up, merge_dicts, argsort, getenv, get_shape, fully_flatten, dedup
-from tinygrad.helpers import IMAGE, DEBUG, WINO, THREEFRY, _METADATA, Metadata, TRACEMETA
+from tinygrad.helpers import IMAGE, DEBUG, WINO, THREEFRY, _METADATA, Metadata, TRACEMETA, get_bounds
 from tinygrad.lazy import LazyBuffer
 from tinygrad.multi import MultiLazyBuffer
 from tinygrad.ops import MetaOps, truncate
@@ -341,16 +341,9 @@ class Tensor:
 
     """
     assert isinstance(self.lazydata, LazyBuffer), "can't shard a MultiLazyBuffer"
-    canonical_devices, bounds = tuple(Device.canonicalize(x) for x in devices), None
-    if axis is not None:
-      if axis < 0: axis += len(self.shape)
-      if splits is None:
-        sz = round_up(self.shape[axis], len(devices)) // len(devices)
-        splits = tuple([max(0, min(sz, self.shape[axis] - sz*i)) for i in range(len(devices))])
-      assert sum(splits) == self.shape[axis], "specified splits do not sum up to axis shape"
-      boundaries = tuple(itertools.accumulate(splits))
-      bounds = tuple(zip((0,) + boundaries, boundaries))
-    return Tensor(MultiLazyBuffer.from_sharded(self.lazydata, canonical_devices, axis, bounds),
+    canonical_devices = tuple(Device.canonicalize(x) for x in devices)
+    if axis is not None and axis < 0: axis += len(self.shape)
+    return Tensor(MultiLazyBuffer.from_sharded(self.lazydata, canonical_devices, axis, get_bounds(devices, self.shape, axis, splits)),
                   device=canonical_devices, requires_grad=self.requires_grad)
 
   def shard_(self, devices:Tuple[str, ...], axis:Optional[int]=None, splits:Optional[Tuple[int, ...]]=None):
@@ -3453,6 +3446,24 @@ class Tensor:
     # NCHW output
     ret = ret.reshape(bs, oy, ox, cout).permute(0,3,1,2)
     return ret if bias is None else ret.add(bias.reshape(1, -1, 1, 1))
+
+def FSDP(devices:Tuple[str, ...]):
+  from tinygrad.nn.state import get_parameters
+  def decorator(cls):
+    original_init, original_forward = cls.__init__, cls.__call__
+    @functools.wraps(original_init)
+    def new_init(self, *args, **kwargs):
+      original_init(self, *args, **kwargs)
+      for x in get_parameters(self): x.shard_(devices, 0)
+    @functools.wraps(original_forward)
+    def new_forward(self, *args, **kwargs):
+      for x in get_parameters(self): x.lazydata = F.Gather.apply(x, arg=get_bounds(devices, x.shape, 0, None)).lazydata
+      result = original_forward(self, *args, **kwargs)
+      for x in get_parameters(self): x.lazydata = F.Scatter.apply(x, arg=get_bounds(devices, x.shape, 0, None)).lazydata
+      return result
+    cls.__init__, cls.__call__ = new_init, new_forward
+    return cls
+  return decorator
 
 # register functions to move between devices
 for device in Device._devices: setattr(Tensor, f"{device.lower()}", functools.partialmethod(Tensor.to, device))
