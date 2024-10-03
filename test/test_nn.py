@@ -13,7 +13,6 @@ from tinygrad.engine.realize import run_schedule
 
 @unittest.skipIf(CI and Device.DEFAULT in {"CUDA", "NV"}, "slow")
 class TestNN(unittest.TestCase):
-  @unittest.skipIf(Device.DEFAULT == "WEBGPU", "no int64 on WebGPU")
   def test_sparse_cat_cross_entropy(self):
     # create in tinygrad
     input_tensor = Tensor.randn(6, 5) # not square to test that mean scaling uses the correct dimension
@@ -425,14 +424,14 @@ class TestNN(unittest.TestCase):
       torch_layer.weight[:] = torch.tensor(layer.weight.numpy(), dtype=torch.float32)
 
     # test
-    x = Tensor(np.random.randint(0, vocab_size, (B, T)))
+    x = Tensor(np.random.randint(0, vocab_size, (B, T), dtype=np.int32))
     z = layer(x)
     torch_x = torch.tensor(x.numpy())
     torch_z = torch_layer(torch_x)
     np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=1e-8, rtol=1e-8)
 
     # test with empty input length
-    x = Tensor(np.random.randint(0, vocab_size, (B, 0)))
+    x = Tensor(np.random.randint(0, vocab_size, (B, 0), dtype=np.int32))
     z = layer(x)
     torch_x = torch.tensor(x.numpy())
     torch_z = torch_layer(torch_x)
@@ -444,7 +443,7 @@ class TestNN(unittest.TestCase):
       return layer(x).realize()
 
     for _ in range(3):
-      x = Tensor(np.random.randint(0, vocab_size, (B, T)))
+      x = Tensor(np.random.randint(0, vocab_size, (B, T), dtype=np.int32))
       z = layer_jit(x)
       torch_x = torch.tensor(x.numpy())
       torch_z = torch_layer(torch_x)

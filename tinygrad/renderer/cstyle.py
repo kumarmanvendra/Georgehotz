@@ -80,6 +80,7 @@ class CStyleLanguage(Renderer):
   extra_args: List[str] = []
   float4: Optional[str] = None
   uses_ptr_arithmetic: bool = False
+  external_local_bufs: bool = False
   type_map: Dict[DType, str] = {}
   infinity: str = "INFINITY"
   nan: str = "NAN"
@@ -120,6 +121,7 @@ class CStyleLanguage(Renderer):
     child_count = Counter(v for ru in uops for v in ru.src)
     bufs: Dict[UOp, Tuple[str, Tuple[DType, bool]]] = {}
     kernel = []
+    prekernel = []
     depth = 1
     c: DefaultDict[str, int] = defaultdict(int)
     for u in uops:
@@ -157,13 +159,14 @@ class CStyleLanguage(Renderer):
           if u.op is UOps.ASSIGN: r[u] = r[u.src[0]]
         else:
           l = f"{self.render_dtype(u.dtype)} {r[u]} = {l}" + (";" if u.op is not UOps.SPECIAL else "")
-        kernel.append("  "*depth + l)
+        # this is annoying, wgsl specific
+        prekernel.append(l) if u.op == UOps.DEFINE_LOCAL and self.external_local_bufs else kernel.append("  "*depth + l)
         if prefix: c[prefix] += 1  # if it was used, increment
       if u.op in {UOps.IF, UOps.RANGE}: depth += 1
     del self.r
 
     # NOTE: this relies on bufs dict preserving order
-    return self.render_kernel(name, kernel, list(bufs.values()), uops)
+    return self.render_kernel(name, kernel, list(bufs.values()), uops, prekernel or None)
 
 class ClangRenderer(CStyleLanguage):
   device = "CLANG"
