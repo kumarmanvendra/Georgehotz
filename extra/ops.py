@@ -3,10 +3,10 @@ from typing import Dict, Union, Tuple, Any, List, cast
 import functools, hashlib
 from enum import Enum, auto
 from dataclasses import dataclass
-from tinygrad.helpers import dedup, pretty_print, prod
-from tinygrad.ops import ReduceOps, UnaryOps, BinaryOps, TernaryOps, UOp, UOps
+from tinygrad.helpers import dedup, prod
+from tinygrad.ops import ReduceOps, UnaryOps, BinaryOps, TernaryOps, UOp, UOps, pretty_print
 from tinygrad.dtype import ImageDType, PtrDType, dtypes, DType, ConstType
-from tinygrad.shape.symbolic import Variable, sint
+from tinygrad.ops import Variable, sint
 from tinygrad.shape.shapetracker import ShapeTracker
 
 # these ops are deleted after AST is UOp
@@ -121,9 +121,9 @@ def to_uop(*a) -> UOp:
         return UOp(UOps.CONST, dtype, (st_uop,), lop.arg.val)
       buf = UOp(UOps.DEFINE_GLOBAL, membuf_dtype if isinstance(membuf_dtype, ImageDType) else PtrDType(membuf_dtype), (), lop.arg.idx)
       if lop.op is BufferOps.LOAD: return UOp(UOps.LOAD, dtype, (buf, st_uop))
-      return UOp(UOps.STORE, None, (buf, st_uop, create_uop(lop.src[0])))
+      return UOp(UOps.STORE, dtypes.void, (buf, st_uop, create_uop(lop.src[0])))
     src = tuple(create_uop(x) for x in lop.src)
-    if lop.op is MetaOps.KERNEL: return UOp(UOps.SINK, None, src)
+    if lop.op is MetaOps.KERNEL: return UOp(UOps.SINK, dtypes.void, src)
     if lop.op in ReduceOps:
       alu_op = {ReduceOps.SUM:BinaryOps.ADD, ReduceOps.PROD:BinaryOps.MUL, ReduceOps.MAX:BinaryOps.MAX}[cast(ReduceOps, lop.op)]
       return UOp(UOps.REDUCE_AXIS, src[0].dtype, src, (alu_op, lop.arg))

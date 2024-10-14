@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from typing import Any, List
 from tinygrad.helpers import getenv, DEBUG, CI
-from tinygrad.dtype import DType, DTYPES_DICT, ImageDType, PtrDType, least_upper_float, least_upper_dtype
+from tinygrad.dtype import DType, DTYPES_DICT, ImageDType, PtrDType, least_upper_float, least_upper_dtype, truncate_fp16
 from tinygrad import Device, Tensor, dtypes
 from tinygrad.tensor import _to_np_dtype
 from hypothesis import given, settings, strategies as strat
@@ -19,7 +19,8 @@ dtype_floats = [dt for dt in core_dtypes if dtypes.is_float(dt) and is_dtype_sup
 
 def get_available_cast_dtypes(dtype: DType) -> List[DType]:
   if not is_dtype_supported(dtype): return []
-  return [v for k, v in DTYPES_DICT.items() if v != dtype and is_dtype_supported(v) and not k.startswith("_")] # dont cast internal dtypes
+  # dont cast internal dtypes
+  return [v for k, v in DTYPES_DICT.items() if v != dtype and is_dtype_supported(v) and not k.startswith("_")]
 
 def _test_to_np(a:Tensor, np_dtype, target):
   if DEBUG >= 2: print(a)
@@ -382,6 +383,12 @@ class TestHelpers(unittest.TestCase):
         np.testing.assert_equal(dtypes.min(dt), False)
         np.testing.assert_equal(dtypes.max(dt), True)
 
+  def test_truncate_fp16(self):
+    self.assertEqual(truncate_fp16(1), 1)
+    self.assertEqual(truncate_fp16(65504), 65504)
+    self.assertEqual(truncate_fp16(65519.999), 65504)
+    self.assertEqual(truncate_fp16(65520), math.inf)
+
 class TestTypeSpec(unittest.TestCase):
   def setUp(self):
     self.old_default_int, self.old_default_float = dtypes.default_int, dtypes.default_float
@@ -571,7 +578,7 @@ class TestAutoCastType(unittest.TestCase):
   def tearDown(self):
     dtypes.default_int, dtypes.default_float = self.old_default_int, self.old_default_float
 
-  @given(strat.sampled_from([d for d in DTYPES_DICT.values() if dtypes.is_int(d) and is_dtype_supported(d)]))
+  @given(strat.sampled_from([d for d in core_dtypes if dtypes.is_int(d) and is_dtype_supported(d)]))
   def test_int_to_float_unary_func(self, dtype):
     for func in [
       lambda t: t.exp(),
@@ -753,6 +760,25 @@ class TestAutoCastType(unittest.TestCase):
     t.square().mean().backward()
     np.testing.assert_allclose(t.grad.numpy().flatten(), [60000 * 2 / (N*N)] * N*N)
 
+  @unittest.skipUnless(is_dtype_supported(dtypes.half), "need half")
+  def test_softmax_dtype(self):
+    data = [1, 2, 3]
+    t = Tensor(data, dtype=dtypes.half)
+    tt = torch.tensor(data, dtype=torch.half)
+
+    out = t.softmax(0)
+    self.assertEqual(out.dtype, dtypes.half)
+    np.testing.assert_allclose(out.numpy(), tt.softmax(0).numpy(), rtol=1e-3)
+    out = t.softmax(0, dtype=dtypes.float)
+    self.assertEqual(out.dtype, dtypes.float)
+    np.testing.assert_allclose(out.numpy(), tt.softmax(0, dtype=torch.float).numpy(), rtol=1e-3)
+    out = t.log_softmax(0)
+    self.assertEqual(out.dtype, dtypes.half)
+    np.testing.assert_allclose(out.numpy(), tt.log_softmax(0).numpy(), rtol=1e-3)
+    out = t.log_softmax(0, dtype=dtypes.float)
+    self.assertEqual(out.dtype, dtypes.float)
+    np.testing.assert_allclose(out.numpy(), tt.log_softmax(0, dtype=torch.float).numpy(), rtol=1e-3)
+
 class TestImplicitFunctionTypeChange(unittest.TestCase):
   def test_functions(self):
     result = []
@@ -775,6 +801,12 @@ class TestTensorMethod(unittest.TestCase):
     a, b = Tensor([2], dtype=dt), Tensor([1], dtype=dt)
     ret = (a - b).abs()
     np.testing.assert_allclose(ret.numpy(), np.abs(a.numpy()-b.numpy()))
+
+class TestDtypeUsage(unittest.TestCase):
+  def test_max_w_alu(self):
+    for d in dtypes.ints:
+      t = Tensor([[1, 2], [3, 4]], dtype=d)
+      (t*t).max().item()
 
 if __name__ == '__main__':
   unittest.main()

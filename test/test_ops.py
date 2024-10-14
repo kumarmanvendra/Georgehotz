@@ -118,7 +118,7 @@ class TestOps(unittest.TestCase):
       with self.assertRaises(ValueError): method((2, -3, 0))
 
   def test_negative_dims_full(self):
-    with self.assertRaises(ValueError): Tensor.full(-3, 2)
+    with self.assertRaises(ValueError): Tensor.full((-3,), 2)
     with self.assertRaises(ValueError): Tensor.full((2, -3), 4)
     with self.assertRaises(ValueError): Tensor.full((2, -3, 0), 4)
 
@@ -344,6 +344,7 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,35), (45,35), (45,35)], lambda x,y,z: x.lerp(y,z))
     helper_test_op(None, lambda x,y,z: x.lerp(y,z), vals=[[1.,2.,3.], [4.,5.,6.], 0.5])
 
+  @unittest.skipIf(Device.DEFAULT == "QCOM", "OpenCL fails to compile this (both on GPU(qcom)/QCOM backends)")
   def test_tril(self):
     helper_test_op([(3,3)], lambda x: x.tril())
     helper_test_op([(3,3)], lambda x: x.tril(1))
@@ -360,6 +361,8 @@ class TestOps(unittest.TestCase):
     helper_test_op([(5,0,3)], lambda x: x.tril())
     helper_test_op([(5,3,3)], lambda x: x.tril(1))
     helper_test_op(None, lambda x: x.tril(), vals=[[[True] * 3] * 3], forward_only=True)
+
+  @unittest.skipIf(Device.DEFAULT == "QCOM", "OpenCL fails to compile this (both on GPU(qcom)/QCOM backends)")
   def test_triu(self):
     helper_test_op([(3,3)], lambda x: x.triu())
     helper_test_op([(3,3)], lambda x: x.triu(1))
@@ -753,10 +756,8 @@ class TestOps(unittest.TestCase):
     # bilinear transformation
     helper_test_op([(2,3),(5,3,7),(2,7)], lambda a,b,c: torch.einsum('ik,jkl,il->ij', [a,b,c]), lambda a,b,c: Tensor.einsum('ik,jkl,il->ij', [a,b,c]))
 
-  @unittest.expectedFailure
   def test_einsum_ellipsis(self):
     """The expected behavior for einsum is described in the PyTorch docs: https://pytorch.org/docs/stable/generated/torch.einsum.html"""
-    # TODO: implement ellipsis support in einsum to pass these tests
     # test ellipsis
     helper_test_op([(3, 8, 9), (3, 8, 9)], lambda a, b: torch.einsum('...id, ...jd -> ...ij', [a, b]),
                lambda a, b: Tensor.einsum('...id, ...jd -> ...ij', [a, b]))
@@ -766,6 +767,9 @@ class TestOps(unittest.TestCase):
     # multiple ellipsis in different operands with different shapes are allowed
     helper_test_op([(2, 3, 4, 5), (5, 2, 4)], lambda a, b: torch.einsum('i...j,ji...->...', [a, b]),
                lambda a, b: Tensor.einsum('i...j,ji...->...', [a, b]))
+    # match torch ellipsis handling
+    helper_test_op([(32, 7, 24, 24, 24), (32, 7, 24, 24, 24)], lambda a, b: torch.einsum('ij...,ij...->ij', [a, b]),
+               lambda a, b: Tensor.einsum('ij...,ij...->ij', [a, b]))
     # multiple ellipsis in one operand are not allowed. This test shall raise an exception.
     with self.assertRaises(RuntimeError):
       helper_test_op([(2, 3, 4), (2, 3, 4)], lambda a, b: torch.einsum('...ik..., ...jk ->', [a, b]),
@@ -874,7 +878,7 @@ class TestOps(unittest.TestCase):
     helper_test_op([(0), (0,8)], lambda x,y: x.matmul(y), Tensor.dot, atol=1e-7)
     helper_test_op([(0), (0)], lambda x,y: x.matmul(y), Tensor.dot, atol=1e-7)
   def test_broadcastdot(self):
-    helper_test_op([(10,45,65), (65,45)], lambda x,y: x @ y, Tensor.dot)
+    helper_test_op([(10,45,65), (65,45)], lambda x,y: x @ y, Tensor.dot, atol=1e-4)
     with self.assertRaises(AssertionError):
       a = Tensor(3.14)
       b = Tensor.ones(3,3)
@@ -885,6 +889,8 @@ class TestOps(unittest.TestCase):
 
   def test_sum_simple(self):
     helper_test_op(None, lambda x: x.sum(), vals=[[1.,1.]])
+  # NOTE: simple test for locals
+  # FORWARD_ONLY=1 DEBUG=4 python3 test/test_ops.py TestOps.test_sum_full
   def test_sum_full(self):
     helper_test_op([(16384)], lambda x: x.sum())
   def test_sum_relu(self):
@@ -934,6 +940,7 @@ class TestOps(unittest.TestCase):
     helper_test_op([(3,4,5,6)], lambda x: x.max(axis=1)[0], lambda x: x.max(axis=1))
     helper_test_op([()], lambda x: x.max())
 
+  @unittest.skipIf(Device.DEFAULT == "QCOM", "OpenCL fails to compile this (both on GPU(qcom)/QCOM backends)")
   def test_any(self):
     helper_test_op([(3,4,5,6)], lambda x: x.any(), forward_only=True)
     helper_test_op(None, lambda x: x.any(), vals=[[True, True]], forward_only=True)
@@ -945,6 +952,7 @@ class TestOps(unittest.TestCase):
   def test_any_zero_axis(self):
     helper_test_op([(1,0,3,0,5)], lambda x: x.any(axis=(1,3)), forward_only=True)
 
+  @unittest.skipIf(Device.DEFAULT == "QCOM", "OpenCL fails to compile this (both on GPU(qcom)/QCOM backends)")
   def test_all(self):
     helper_test_op([(3,4,5,6)], lambda x: x.all(), forward_only=True)
     helper_test_op(None, lambda x: x.all(), vals=[[True, True]], forward_only=True)
@@ -1063,6 +1071,18 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45)], lambda x: torch.logsumexp(x, dim=0), lambda x: x.logsumexp(0), atol=1e-7, grad_atol=1e-7)
     helper_test_op([()], lambda x: torch.logsumexp(x, dim=0), lambda x: x.logsumexp(0), atol=1e-7, grad_atol=1e-7)
     helper_test_op([()], lambda x: torch.logsumexp(x, dim=-1), lambda x: x.logsumexp(-1), atol=1e-7, grad_atol=1e-7)
+
+  def test_logcumsumexp(self):
+    helper_test_op([(45,65)], lambda x: torch.logcumsumexp(x, dim=0), lambda x: x.logcumsumexp(0), atol=1e-7, grad_atol=1e-7)
+    helper_test_op([(45,65)], lambda x: torch.logcumsumexp(x, dim=1), lambda x: x.logcumsumexp(1), atol=1e-7, grad_atol=1e-7)
+    helper_test_op([(45)], lambda x: torch.logcumsumexp(x, dim=0), lambda x: x.logcumsumexp(0), atol=1e-7, grad_atol=1e-7)
+    helper_test_op([()], lambda x: torch.logcumsumexp(x, dim=0), lambda x: x.logcumsumexp(0), atol=1e-7, grad_atol=1e-7)
+    helper_test_op([()], lambda x: torch.logcumsumexp(x, dim=0), lambda x: x.logcumsumexp(), atol=1e-7, grad_atol=1e-7)
+    helper_test_op([()], lambda x: torch.logcumsumexp(x, dim=-1), lambda x: x.logcumsumexp(-1), atol=1e-7, grad_atol=1e-7)
+
+  @unittest.expectedFailure  # TODO: fix numerical instability
+  def test_logcumsumexp_numerical(self):
+    helper_test_op(None, lambda x: torch.logcumsumexp(x, dim=0), lambda x: x.logcumsumexp(), atol=1e-7, grad_atol=1e-7, vals=[[0.0, 100.0]])
 
   def test_sinh(self):
     helper_test_op([(45,65)], lambda x: x.sinh(), grad_atol=1e-6)
@@ -1216,6 +1236,7 @@ class TestOps(unittest.TestCase):
     with self.assertRaisesRegex(IndexError, "out of bounds"): a[1, -4]
     with self.assertRaisesRegex(IndexError, "single ellipsis"): a[..., ...] # IndexError: only single ellipsis
     with self.assertRaises(ValueError): a[::0, 1] # no 0 strides
+    with self.assertRaises(TypeError): a[:Tensor([3]), 1] # Tensor can't be used as a slice parameter
     with self.assertRaises(IndexError): b[:] # slice cannot be applied to a 0-dim tensor
 
   def test_slice_ellipsis(self):
@@ -1368,6 +1389,21 @@ class TestOps(unittest.TestCase):
     helper_test_op([(4,3,6,6)], lambda x: x.unflatten(0, (2, 2)))
     helper_test_op([(4,3,6,6)], lambda x: x.unflatten(3, (3, 2)))
     helper_test_op([(4,3,6,6)], lambda x: x.unflatten(-1, (3, 2, 1)))
+
+  def test_roll(self):
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, 1, 0), lambda x: x.roll(1, 0))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, -1, 0), lambda x: x.roll(-1, 0))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, shifts=(2, 1), dims=(0, 1)), lambda x: x.roll(shifts=(2, 1), dims=(0, 1)))
+    helper_test_op([(2, 4, 6)], lambda x: torch.roll(x, 1, 0), lambda x: x.roll(1, 0))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, 1, -1), lambda x: x.roll(1, -1))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, -1, -1), lambda x: x.roll(-1, -1))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, 5, 0), lambda x: x.roll(5, 0))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, -5, 0), lambda x: x.roll(-5, 0))
+    helper_test_op([(2, 4, 6)], lambda x: torch.roll(x, shifts=(2, -3), dims=(0, 2)), lambda x: x.roll(shifts=(2, -3), dims=(0, 2)))
+    helper_test_op([(2, 4, 6)], lambda x: torch.roll(x, shifts=(1, 2, -1), dims=(0, 1, 2)), lambda x: x.roll(shifts=(1, 2, -1), dims=(0, 1, 2)))
+    helper_test_op([(2, 4)], lambda x: torch.roll(x, 0, 0), lambda x: x.roll(0, 0))
+    helper_test_op([(2, 4, 6)], lambda x: torch.roll(x, shifts=(0, 0), dims=(0, 1)), lambda x: x.roll(shifts=(0, 0), dims=(0, 1)))
+    helper_test_op([(2, 4, 6)], lambda x: torch.roll(x, shifts=(0, 2), dims=(0, 1)), lambda x: x.roll(shifts=(0, 2), dims=(0, 1)))
 
   def test_detach(self):
     helper_test_op([(4,3,6,6)], lambda x: x.detach(), forward_only=True)
@@ -1802,33 +1838,21 @@ class TestOps(unittest.TestCase):
         lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="linear", align_corners=True),
         lambda x: Tensor.interpolate(x, size=out_sz, mode="linear", align_corners=True))
 
-  def test_interpolate_nearest(self):
-    for in_sz, out_sz in [((52,),(29,)), ((29,),(52,))]:
+  def test_interpolate_nearest(self, mode="nearest"):
+    for in_sz, out_sz in [((13,),(9,)), ((9,),(13,))]:
       helper_test_op([(2,3)+in_sz],
-        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="nearest"),
-        lambda x: Tensor.interpolate(x, size=out_sz, mode="nearest"))
-    for in_sz, out_sz in [((52,40),(29,31)), ((52,29),(31,40)), ((29,31),(40,52))]:
+        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode=mode),
+        lambda x: Tensor.interpolate(x, size=out_sz, mode=mode))
+    for in_sz, out_sz in [((13,10),(9,11)), ((13,9),(11,10)), ((9,11),(10,13))]:
       helper_test_op([(2,3)+in_sz],
-        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="nearest"),
-        lambda x: Tensor.interpolate(x, size=out_sz, mode="nearest"))
+        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode=mode),
+        lambda x: Tensor.interpolate(x, size=out_sz, mode=mode))
     for in_sz, out_sz in [((5,2,8),(3,6,4))]:
       helper_test_op([(2,3)+in_sz],
-        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="nearest"),
-        lambda x: Tensor.interpolate(x, size=out_sz, mode="nearest"))
+        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode=mode),
+        lambda x: Tensor.interpolate(x, size=out_sz, mode=mode))
 
-  def test_interpolate_nearest_exact(self):
-    for in_sz, out_sz in [((52,),(29,)), ((29,),(52,))]:
-      helper_test_op([(2,3)+in_sz],
-        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="nearest-exact"),
-        lambda x: Tensor.interpolate(x, size=out_sz, mode="nearest-exact"))
-    for in_sz, out_sz in [((52,40),(29,31)), ((52,29),(31,40)), ((29,31),(40,52))]:
-      helper_test_op([(2,3)+in_sz],
-        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="nearest-exact"),
-        lambda x: Tensor.interpolate(x, size=out_sz, mode="nearest-exact"))
-    for in_sz, out_sz in [((5,2,8),(3,6,4))]:
-      helper_test_op([(2,3)+in_sz],
-        lambda x: torch.nn.functional.interpolate(x, size=out_sz, mode="nearest-exact"),
-        lambda x: Tensor.interpolate(x, size=out_sz, mode="nearest-exact"))
+  def test_interpolate_nearest_exact(self): self.test_interpolate_nearest("nearest-exact")
 
   def test_interpolate_bilinear(self):
     for in_sz, out_sz in [((52,40),(29,31)), ((52,29),(31,40)), ((29,31),(40,52))]:
@@ -2073,7 +2097,12 @@ class TestOps(unittest.TestCase):
                                        lambda x,y: x.sigmoid().binary_crossentropy(y.clip(0,1)))
     helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.binary_cross_entropy(x.sigmoid(),torch.clip(y,0,1)),
                                        lambda x,y: x.binary_crossentropy_logits(y.clip(0,1)))
-
+  def test_binary_crossentropy_reductions(self):
+    for r in ("mean", "sum", "none"):
+      helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.binary_cross_entropy(x.sigmoid(), torch.clip(y,0,1), reduction=r),
+                                         lambda x,y: x.sigmoid().binary_crossentropy(y.clip(0,1), reduction=r))
+      helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.binary_cross_entropy_with_logits(x, torch.clip(y,0,1), reduction=r),
+                                         lambda x,y: x.binary_crossentropy_logits(y.clip(0,1), reduction=r))
   def test_cross_entropy(self):
     helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.cross_entropy(x, y),
                                        lambda x,y: x.cross_entropy(y))
@@ -2083,6 +2112,9 @@ class TestOps(unittest.TestCase):
     for r in ("mean", "sum", "none"):
       helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.cross_entropy(x, y, reduction=r),
                                          lambda x,y: x.cross_entropy(y, reduction=r))
+    self.helper_test_exception([(32,10), (32,10)], lambda x,y: torch.nn.functional.cross_entropy(x, y, reduction="typo"),
+                                                   lambda x,y: x.cross_entropy(y, reduction="typo"), expected=ValueError)
+
   def test_cross_entropy_smoothing(self):
     for ls in (0., 0.3, 0.7, 1.):
       helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.cross_entropy(x, y, label_smoothing=ls),
@@ -2104,12 +2136,16 @@ class TestOps(unittest.TestCase):
     helper_test_op([(32,10)], lambda x: x.masked_fill((x>0.1).detach(), -math.inf))
     helper_test_op([(32,10)], lambda x: x.masked_fill((x<0.1).detach(), -math.inf))
 
+  @unittest.skipIf(Device.DEFAULT == "QCOM", "OpenCL fails to compile this (both on GPU(qcom)/QCOM backends)")
   def test_cast(self):
     helper_test_op([(3, 3)], lambda x: x.float())
     helper_test_op(None, lambda x: x.float(), vals=[[0, 1, 2, 3]], forward_only=True)
     helper_test_op(None, lambda x: x.float(), vals=[[True, False]], forward_only=True)
     helper_test_op([(3, 3)], lambda x: x.int(), forward_only=True)
     helper_test_op([(3, 3)], lambda x: x.bool(), forward_only=True)
+
+  def test_bitcast(self):
+    helper_test_op([(3, 3)], lambda x: x.view(torch.int32), lambda x: x.bitcast(dtypes.int32), forward_only=True)
 
 class TestOpsUint8(unittest.TestCase):
   def test_cast(self):

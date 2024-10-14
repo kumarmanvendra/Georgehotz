@@ -3,7 +3,7 @@ import numpy as np
 import unittest
 from tinygrad import Tensor, Device, dtypes
 from tinygrad.ops import UOps
-from tinygrad.lazy import LazyBuffer, MetaOps
+from tinygrad.engine.lazy import LazyBuffer, MetaOps
 from tinygrad.engine.schedule import create_schedule
 
 class TestLazyBuffer(unittest.TestCase):
@@ -62,12 +62,12 @@ class TestLazyBuffer(unittest.TestCase):
 
   def test_const_dtype(self):
     lb: LazyBuffer = Tensor([1], dtype=dtypes.int).lazydata
-    assert lb.const(1).base.arg == 1
-    assert type(lb.const(1).base.arg) is int
+    assert lb.const_like(1).base.arg == 1
+    assert type(lb.const_like(1).base.arg) is int
 
     lb: LazyBuffer = Tensor([1], dtype=dtypes.float).lazydata
-    assert lb.const(1).base.arg == 1.0
-    assert type(lb.const(1).base.arg) is float
+    assert lb.const_like(1).base.arg == 1.0
+    assert type(lb.const_like(1).base.arg) is float
 
 class TestReduceOp(unittest.TestCase):
   def test_no_split_reduce_kernel(self):
