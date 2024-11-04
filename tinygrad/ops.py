@@ -786,16 +786,16 @@ spec = PatternMatcher([
 
   # most ALUs have all matching dtypes, except CMPLT, CMPNE, and WHERE
   (UPat(Ops.ALU, name="w", src=(UPat(dtype=dtypes.bool), UPat(name="x"), UPat(name="y")), arg=TernaryOps.WHERE),
-   lambda w,x,y: w.dtype == x.dtype == y.dtype),
-  (UPat(Ops.ALU, dtype=dtypes.bool, src=(UPat(name="x"), UPat(name="y")), arg=BinaryOps.CMPLT), lambda x,y: x.dtype == y.dtype),
-  (UPat(Ops.ALU, dtype=dtypes.bool, src=(UPat(name="x"), UPat(name="y")), arg=BinaryOps.CMPNE), lambda x,y: x.dtype == y.dtype),
+   lambda w,x,y: w.dtype.scalar() == x.dtype.scalar() == y.dtype.scalar()),
+  (UPat(Ops.ALU, dtype=dtypes.bool, src=(UPat(name="x"), UPat(name="y")), arg=BinaryOps.CMPLT), lambda x,y: x.dtype.scalar() == y.dtype.scalar()),
+  (UPat(Ops.ALU, dtype=dtypes.bool, src=(UPat(name="x"), UPat(name="y")), arg=BinaryOps.CMPNE), lambda x,y: x.dtype.scalar() == y.dtype.scalar()),
   # and SHL/SHR, the shift distance is an int
   (UPat(Ops.ALU, src=(UPat(name="x"), UPat(name="y")), name="alu", arg=BinaryOps.SHL),
-   lambda alu,x,y: alu.dtype == x.dtype and (x.dtype == y.dtype or y.dtype == dtypes.uint)),
+   lambda alu,x,y: alu.dtype.scalar() == x.dtype.scalar() and (x.dtype.scalar() == y.dtype.scalar() or y.dtype == dtypes.uint)),
   (UPat(Ops.ALU, src=(UPat(name="x"), UPat(name="y")), name="alu", arg=BinaryOps.SHR),
-   lambda alu,x,y: alu.dtype == x.dtype and (x.dtype == y.dtype or y.dtype == dtypes.uint)),
+   lambda alu,x,y: alu.dtype.scalar() == x.dtype.scalar() and (x.dtype.scalar() == y.dtype.scalar() or y.dtype == dtypes.uint)),
   (UPat(Ops.ALU, arg=BinaryOps.IDIV, name="x"), lambda x: None if dtypes.is_int(x.dtype) else False),
-  (UPat(Ops.ALU, name="x"), lambda x: all(x.dtype == y.dtype for y in x.src)),
+  (UPat(Ops.ALU, name="x"), lambda x: all(x.dtype.scalar() == y.dtype.scalar() for y in x.src)),
 
   (UPat(Ops.ASSIGN, src=(UPat((Ops.DEFINE_ACC, Ops.DEFINE_GLOBAL)), UPat())), lambda: True),
   (UPat(Ops.ENDRANGE, dtype=dtypes.void, src=(UPat(Ops.RANGE),)), lambda: True),
@@ -1051,7 +1051,8 @@ symbolic_simple = PatternMatcher([
 
 symbolic = symbolic_simple+PatternMatcher([
   # ** COMMUTATIVE flipping **
-  *[(UPat(Ops.ALU, arg=op, name='x'), lambda x: x.replace(src=x.src[::-1]) if x.src[1].tuplize < x.src[0].tuplize else None) for op in COMMUTATIVE],
+  *[(UPat(Ops.ALU, dtype=dtypes.ints, arg=op, name='x'),
+     lambda x: x.replace(src=x.src[::-1]) if x.src[1].tuplize < x.src[0].tuplize else None) for op in COMMUTATIVE],
   # group like
   ((UPat.var("x") + UPat.var("y")) + UPat.var("x") * UPat.cvar("c"), lambda x,y,c: (x+x*c)+y),
   # ** combine terms **
