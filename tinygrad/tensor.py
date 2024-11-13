@@ -1375,10 +1375,11 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     dim = self._resolve_dim(dim, outer=True)
     return self.reshape(self.shape[:dim] + (1,) + self.shape[dim:])
 
-  def pad2d(self, padding:Sequence[int], value:float=0.0) -> Tensor:
+  def pad2d(self, padding:Sequence[int], value:float=0.0, mode:str="constant") -> Tensor:
     """
-    Returns a tensor that pads the last two axes specified by `padding` (padding_left, padding_right, padding_top, padding_bottom).
-    If `value` is specified, the tensor is padded with `value` instead of `0.0`.
+    Returns a tensor that pads from the last axis specified by `padding` (padding_left, padding_right, padding_top, padding_bottom, ...).
+    The padding modes is selected with `mode` which supports 'constant', 'reflect', 'replicate' and 'circular'
+    If 'constant' is selected as `mode` and `value` is specified, the tensor is padded with `value` instead of `0.0`.
 
     ```python exec="true" source="above" session="tensor" result="python"
     t = Tensor.arange(9).reshape(1, 1, 3, 3)
@@ -1387,11 +1388,33 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     ```python exec="true" source="above" session="tensor" result="python"
     print(t.pad2d((1, 1, 2, 0), value=-float("inf")).numpy())
     ```
+    ```python exec="true" source="above" session="tensor" result="python"
+    print(t.pad2d((2, 2, 2, 0), mode="reflect").numpy())
+    ```
     """
-    pads = tuple((smax(p0, 0), smax(p1, 0)) for p0, p1 in zip(padding[::2], padding[1::2]))[::-1]
-    padded = self.pad((None,) * (self.ndim - len(padding) // 2) + tuple(pads), value=value)
-    shrink = tuple((-smin(p0, 0), smin(p1 + s, s)) for p0, p1, s in zip(padding[::2], padding[1::2], padded.shape[::-1]))[::-1]
-    return padded.shrink((None,) * (self.ndim - len(padding) // 2) + shrink)
+    if mode not in {"constant", "reflect", "replicate", "circular"}: raise ValueError(f"{mode=} is not supported")
+    # padding (left, right, top, bottom, ...) -> padding_X (..., (top, bottom), (left, right))
+    X, pX = self, ((0,0),)*(self.ndim - len(padding)//2) + tuple(zip(padding[-2::-2], padding[::-2]))
+    pads, shrinks = tuple((smax(pB,0), smax(pA,0)) for pB,pA in pX), tuple((-smin(pB,0),smin(pA+s,s)) for (pB,pA),s in zip(pX, X.shape))
+    if mode == "constant": return X.shrink(shrinks).pad(pads, value)
+    if mode == "circular":
+      if any(pB>sh or pA>sh for (pB,pA),sh in zip(pX, X.shape)): raise RuntimeError('Padding value causes wrapping around more than once.')
+      # first crop
+      X = X.shrink(shrinks)
+      cropped, X = X.shape, X.repeat(tuple(int(pB > 0) + int(pA > 0) + 1 for pB, pA in pads))
+      # shrink to circular padded shape if repeated shape is larger than circular padded shape else pad 0 to get to padded shape
+      X = X.shrink(tuple((smax(csh-pB, 0) if pB>0 else 0, xsh - smax(csh-pA, 0) if pA>0 else xsh) for (pB,pA),csh,xsh in zip(pX, cropped, X.shape)))
+      return X.pad(tuple((smax(pB-csh, 0), smax(pA-csh, 0)) for (pB,pA),csh in zip(pads,cropped)))
+    for d,(pB,pA) in enumerate(pads):
+      if mode == "reflect":
+        if pB >= (s:=X.shape[d]) or pA>=s: raise RuntimeError(f"Padding ({pB}, {pA}) should be less than the input size={s} for dim={d}.")
+        xB = X[[slice(pB,0,-1) if i == d else slice(None) for i in range(X.ndim)]] if pB else None
+        xA = X[[slice(s-2 if s-2>=0 else None, s-2-pA if s-2-pA>=0 else None, -1) if i==d else slice(None) for i in range(X.ndim)]] if pA else None
+      if mode == "replicate":
+        xB = X[[slice(None,1) if i==d else slice(None) for i in range(X.ndim)]].expand([pB if i==d else None for i in range(X.ndim)]) if pB else None
+        xA = X[[slice(-1,None) if i==d else slice(None) for i in range(X.ndim)]].expand([pA if i==d else None for i in range(X.ndim)]) if pA else None
+      X = Tensor.cat(*(X_ for X_ in (xB, X, xA) if X_ is not None), dim=d)
+    return X.shrink(tuple((-smin(pB,0), smin(pA+s,s)) for (pB,pA),s in zip(pX, X.shape)))
 
   @property
   def T(self) -> Tensor:
@@ -1985,10 +2008,26 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     return xup.permute(*range(len(noop_)), *[len(noop_)+i*2 for i in range(len(i_))], *[len(noop_)+i*2+1 for i in range(len(i_))])
 
   def _padding2d(self, padding:Union[int, Sequence[int]], dims:int) -> Sequence[int]:
+    if isinstance(padding, (tuple,list)): assert len(padding) == 2*dims or len(padding) == dims, f"Expected padding of length {2*dims} or {dims}, but got {len(padding)} for tensor of shape {self.shape}"  # noqa: E501
     return [padding]*2*dims if isinstance(padding, int) else (padding if len(padding) == 2*dims else [p for p in padding for _ in range(2)][::-1])
 
+  # :D:D:D:D:D:D:D:D:D:D:D:D:D:D:D, yes this is unreadable gibberish I know
+  def _ceil_mode_padding2d(self,d_,k_,s_,p_) -> List[int]:
+    (d_,k_,s_,p_) = (make_tuple(x, len(i_ := self.shape[-len(k_):])) for x in (d_,k_,s_,p_))
+    o_ = [ceildiv(i+2*p-d*(k-1)-1,s)+1 for i,d,k,s,p in zip(i_,d_,k_,s_,p_)]
+    pads = list(self._padding2d(p_, len(k_)))
+    # we have to pre-pad before _pool so that o_ in _pool is calculated correctly
+    for j, (o,i,s,p,k,d) in enumerate(zip(o_, i_, s_, p_, k_, d_)):
+      # pad so that sliding windows inside the input shape is _pool-ed with full kernel shape
+      pads[-1-j*2] += ((o-1)*s+d*(k-1)+1)-(i+2*p)
+      # remove extra end pads that result in sliding windows starting in the padded region outside input shape
+      pads[-1-j*2] -= max(0, s*(o-1)+1-i-p)
+    # print(f"{i_=}, {o_=}, {k_=}, {d_=}, {s_=}, {p=}")
+    # print(pads)
+    return pads
+
   # NOTE: these work for more than 2D
-  def avg_pool2d(self, kernel_size=(2,2), stride=None, dilation=1, padding=0, count_include_pad=True):
+  def avg_pool2d(self, kernel_size=(2,2), stride=None, dilation=1, padding=0, ceil_mode=False, count_include_pad=True):
     """
     Applies average pooling over a tensor.
 
@@ -2006,9 +2045,17 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     """
     padding_, axis = self._padding2d(padding, len(k_ := make_tuple(kernel_size, 2))), tuple(range(-len(k_), 0))
     def pool(x:Tensor) -> Tensor: return x.pad2d(padding_)._pool(k_, stride if stride is not None else k_, dilation)
+    # TODO: clean this up
+    # the inferred padding from ceil_mode is not counted towards denominator
+    if (padding != 0 and not all(p==0 for p in make_tuple(padding, 2))) and ceil_mode and count_include_pad:
+      padding_ = self._ceil_mode_padding2d(dilation, k_, stride if stride is not None else k_, padding)
+      inferred_pads = [after - before for after, before in zip(padding_, self._padding2d(padding, len(k_)))]
+      return pool(self).sum(axis=axis) / self.pad2d(self._padding2d(padding, len(k_))).ones_like().pad2d(inferred_pads)\
+                                             ._pool(k_, stride if stride is not None else k_, dilation).sum(axis=axis)
+    if ceil_mode: padding_ = self._ceil_mode_padding2d(dilation, k_, stride if stride is not None else k_, padding)
     return pool(self).mean(axis=axis) if count_include_pad else pool(self).sum(axis=axis) / pool(self.ones_like()).sum(axis=axis)
 
-  def max_pool2d(self, kernel_size=(2,2), stride=None, dilation=1, padding=0):
+  def max_pool2d(self, kernel_size=(2,2), stride=None, dilation=1, padding=0, ceil_mode=False):
     """
     Applies max pooling over a tensor.
 
@@ -2025,6 +2072,7 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     ```
     """
     padding_ = self._padding2d(padding, len(k_ := make_tuple(kernel_size, 2)))
+    if ceil_mode: padding_ = self._ceil_mode_padding2d(dilation, k_, stride if stride is not None else k_, padding)
     return self.pad2d(padding_, value=float('-inf'))._pool(k_, stride if stride is not None else k_, dilation).max(axis=tuple(range(-len(k_), 0)))
 
   def conv2d(self, weight:Tensor, bias:Optional[Tensor]=None, groups=1, stride=1, dilation=1, padding:int|Tuple[int, ...]=0,
@@ -2045,7 +2093,6 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     if IMAGE: return self.image_conv2d(weight, bias, groups, stride, dilation, padding, acc_dtype)
     (bs,cin_), (cout,cin), HW = self.shape[:2], weight.shape[:2], weight.shape[2:]
     assert groups*cin == cin_ and len(self.shape) == len(weight.shape), f"Input Tensor shape {self.shape} does not match the shape of the weights {weight.shape}. ({groups*cin} vs. {cin_})"  # noqa: E501
-    if isinstance(padding, (tuple,list)): assert len(padding) == 2*len(HW) or len(padding) == len(HW), f"Expected padding of length {2*len(HW)} or {len(HW)}, but got {len(padding)} for tensor of shape {self.shape}"  # noqa: E501
     padding_ = self._padding2d(padding, len(HW))
 
     # conv2d is a pooling op (with padding)
@@ -2566,6 +2613,25 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     """
     return self.relu() - alpha*(1-self.exp()).relu()
 
+  def prelu(self, weight: Tensor, channel_dim:Optional[int]=1):
+    """
+    Applies the Parametric Rectified Linear Unit (PReLU) function element-wise.
+    NOTE: prelu follows unconventional broadcasting rules if weight is a non-scalar 1-D Tensor
+
+    - Described: https://paperswithcode.com/method/prelu
+    - Paper: https://arxiv.org/abs/1502.01852v1
+    - See: https://pytorch.org/docs/stable/generated/torch.nn.functional.prelu.html
+
+    ```python exec="true" source="above" session="tensor" result="python"
+    print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).prelu().numpy())
+    ```
+    """
+    if self.ndim <= 2 and weight.ndim != 0: raise ValueError("weight must be scalar if there are no channels")
+    if weight.ndim == 1 and weight.numel() != 1:
+      weight = weight.reshape(*(weight.size(0) if i == self.shape.index(weight.size(0)) else 1 for i in range(self.ndim))) \
+               if channel_dim is None else weight.reshape(*(1 if i != 1 else self.size(i) for i in range(self.ndim)))
+    return (self > 0).where(self, self * weight)
+
   def celu(self, alpha=1.0):
     """
     Applies the Continuously differentiable Exponential Linear Unit (CELU) function element-wise.
@@ -2804,6 +2870,18 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     ```
     """
     return self / (1 + self.abs())
+
+  def selu(self, alpha=1.6732632423543772848170429916717, scale=1.0507009873554804934193349852946):
+    """
+    Applies the Selu function element-wise.
+
+    - Described: https://paperswithcode.com/method/selu
+
+    ```python exec="true" source="above" session="tensor" result="python"
+    print(Tensor([-3., -2., -1., 0., 1., 2., 3.]).softsign().numpy())
+    ```
+    """
+    return scale * (self.relu() - (-alpha*self.exp()+alpha).relu())
 
   # ***** broadcasted elementwise ops *****
   def _broadcast_to(self, shape:Tuple[sint, ...]) -> Tensor:
@@ -3333,6 +3411,32 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     Y = Y.one_hot(num_classes=cast(int, self.shape[1])) if Y.ndim < 2 else Y
     Y = (1 - label_smoothing)*Y + label_smoothing / cast(int, Y.shape[1])
     ret = -self.log_softmax(axis=1).mul(Y).sum(axis=1)
+    return ret._do_reduction(reduction)
+
+  def nll_loss(self, Y:Tensor, weight:Optional[Tensor]=None, ignore_index:Optional[int]=None, reduction:ReductionStr="mean") -> Tensor:
+    """
+    Compute the negative log likelihood loss between input logits and target.
+
+    NOTE: `self` are logits and `Y` are the Y labels or class probabilities.
+
+    See: https://pytorch.org/docs/stable/generated/torch.nn.functional.nll_loss.html
+
+    ```python exec="true" source="above" session="tensor" result="python"
+    t = Tensor([[-1, 2, -3], [1, -2, 3]])
+    Y = Tensor([1, 2])
+    print(t.nll_loss(Y).item())
+    ```
+    ```python exec="true" source="above" session="tensor" result="python"
+    t = Tensor([[-1, 2, -3], [1, -2, 3]])
+    Y = Tensor([1, 2])
+    print(t.nll_loss(Y, reduction='none').numpy())
+    ```
+    """
+    x, Y, target_shape = self.reshape(self.size(0), self.size(1), -1), Y.reshape(self.size(0), -1), Y.shape
+    mask = Tensor.ones_like(Y) if ignore_index is None else (Y != ignore_index)
+    masked_weight = mask if weight is None else weight[Y] * mask
+    ret = (-x.gather(1, Y.unsqueeze(1)).squeeze(1) * masked_weight).reshape(target_shape)
+    if reduction == "mean": return ret.sum() / (masked_weight.sum())
     return ret._do_reduction(reduction)
 
   # ***** Tensor Properties *****

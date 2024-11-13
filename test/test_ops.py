@@ -661,6 +661,10 @@ class TestOps(unittest.TestCase):
   def test_softsign_exact(self):
     helper_test_op(None, torch.nn.functional.softsign, Tensor.softsign, vals=[[-1.,0,1]])
 
+  def test_selu(self):
+    helper_test_op([(45,65)], torch.nn.functional.selu, Tensor.selu)
+    helper_test_op([()], torch.nn.functional.selu, Tensor.selu)
+
   def test_sigmoid(self):
     helper_test_op([(45,65)], torch.sigmoid, Tensor.sigmoid)
     helper_test_op([(45,65)], torch.sigmoid, Tensor.sigmoid, low=300, high=400)
@@ -695,6 +699,12 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,65)], torch.nn.functional.elu, Tensor.elu)
     helper_test_op([(45,65)], lambda x: torch.nn.functional.elu(x, alpha=0.1), lambda x: Tensor.elu(x, alpha=0.1))
     helper_test_op([()], torch.nn.functional.elu, Tensor.elu)
+  # TODO: fix backward
+  def test_prelu(self):
+    helper_test_op([(45,65), ()], lambda x,w: torch.nn.functional.prelu(x,w), lambda x,w: Tensor.prelu(x,w,channel_dim=1), forward_only=True)
+    helper_test_op([(1,3,6,6), ()], lambda x,w: torch.nn.functional.prelu(x,w), lambda x,w: Tensor.prelu(x,w,channel_dim=1), forward_only=True)
+    helper_test_op([(1,3,6,6), (3,)], lambda x,w: torch.nn.functional.prelu(x,w), lambda x,w: Tensor.prelu(x,w,channel_dim=1), forward_only=True)
+    helper_test_op([(3,3,3,3), (3,)], lambda x,w: torch.nn.functional.prelu(x,w), lambda x,w: Tensor.prelu(x,w,channel_dim=1), forward_only=True)
   def test_relu6(self):
     helper_test_op([(45,65)], torch.nn.functional.relu6, Tensor.relu6)
     helper_test_op([()], torch.nn.functional.relu6, Tensor.relu6)
@@ -1300,6 +1310,29 @@ class TestOps(unittest.TestCase):
     helper_test_op([(3,3,3,3)], lambda x: torch.nn.functional.pad(x, (1,2,3,4), value=5), lambda x: x.pad2d(padding=(1,2,3,4),value=5))
     helper_test_op([(3,3,3,3)], lambda x: torch.nn.functional.pad(x, (-1,2,-3,4), value=5), lambda x: x.pad2d(padding=(-1,2,-3,4),value=5))
 
+  @unittest.skip("passes locally need to investigate")
+  def test_pad2d_modes(self):
+    for mode in ("reflect", "replicate", "circular"):
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (1,2,3,4), mode=mode),lambda x: x.pad2d((1,2,3,4), mode=mode))
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (3,-3,0,0), mode=mode), lambda x: x.pad2d(padding=(3,-3,0,0), mode=mode))
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (3,-4,0,-3), mode=mode), lambda x: x.pad2d(padding=(3,-4,0,-3), mode=mode))
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (3,-5,0,-5), mode=mode), lambda x: x.pad2d(padding=(3,-5,0,-5), mode=mode))
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (1,0,0,4), mode=mode),lambda x: x.pad2d((1,0,0,4), mode=mode))
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (4,4,4,4), mode=mode),lambda x: x.pad2d((4,4,4,4), mode=mode))
+
+  def test_pad2d_edge_cases(self):
+    # large than shape pad
+    for mode in ("constant", "replicate", "circular"):
+      helper_test_op([(1,1,5,5)], lambda x: torch.nn.functional.pad(x, (3,5,0,0), mode=mode), lambda x: x.pad2d(padding=(3,5,0,0), mode=mode))
+    # error triggers on larger than full shape
+    self.helper_test_exception([(1,1,5,5)],
+                                lambda x: torch.nn.functional.pad(x, (3,6,0,0),mode="circular"), lambda x: x.pad2d(padding=(3,6,0,0),mode="circular"),
+                                expected=RuntimeError)
+    # error triggers on larger than mirrored shape (edge not counted)
+    self.helper_test_exception([(1,1,5,5)],
+                                lambda x: torch.nn.functional.pad(x, (3,5,0,0),mode="reflect"), lambda x: x.pad2d(padding=(3,5,0,0),mode="reflect"),
+                                expected=RuntimeError)
+
   def test_pad(self):
     helper_test_op([(3,3)], lambda x: torch.nn.functional.pad(x, (1,2,3,4)),lambda x: x.pad(((3,4),(1,2))))
     helper_test_op([(3,3)], lambda x: torch.nn.functional.pad(x, (1,2,3,4), value=5), lambda x: x.pad(((3,4), (1,2)), value=5))
@@ -1852,6 +1885,14 @@ class TestOps(unittest.TestCase):
         lambda x: torch.nn.functional.max_pool2d(x, kernel_size=(5,5), dilation=dilation),
         lambda x: Tensor.max_pool2d(x, kernel_size=(5,5), dilation=dilation))
 
+  def test_maxpool2d_ceil_mode(self):
+    shape = (1,1,6,6)
+    for ksz in [(3,3), 2, 3, (3,2)]:
+      with self.subTest(kernel_size=ksz):
+        helper_test_op([shape],
+          lambda x: torch.nn.functional.max_pool2d(x, kernel_size=ksz, padding=1, stride=3, ceil_mode=True),
+          lambda x: Tensor.max_pool2d(x, kernel_size=ksz, padding=1, stride=3, ceil_mode=True))
+
   def test_avgpool2d(self):
     shape = (32,2,111,28)
     for ksz in [(2,2), (3,3), (3,2), (5,5), (5,1)]:
@@ -1874,6 +1915,22 @@ class TestOps(unittest.TestCase):
         helper_test_op([shape],
           lambda x: torch.nn.functional.avg_pool2d(x, kernel_size=ksz, padding=1),
           lambda x: Tensor.avg_pool2d(x, kernel_size=ksz, padding=1), rtol=1e-5)
+
+  def test_avgpool2d_ceil_mode(self):
+    shape = (1,1,6,6)
+    for ksz in [(3,3), 2, 3, (3,2)]:
+      with self.subTest(kernel_size=ksz):
+        helper_test_op([shape],
+          lambda x: torch.nn.functional.avg_pool2d(x, kernel_size=ksz, padding=1, stride=3, ceil_mode=True, count_include_pad=False),
+          lambda x: Tensor.avg_pool2d(x, kernel_size=ksz, padding=1, stride=3, ceil_mode=True, count_include_pad=False), rtol=1e-5)
+
+  def test_avgpool2d_ceil_mode_include_pad(self):
+    shape = (1,1,6,6)
+    for ksz in [(3,3), 2, 3, (3,2)]:
+      with self.subTest(kernel_size=ksz):
+        helper_test_op([shape],
+          lambda x: torch.nn.functional.avg_pool2d(x, kernel_size=ksz, padding=1, stride=3, ceil_mode=True, count_include_pad=True),
+          lambda x: Tensor.avg_pool2d(x, kernel_size=ksz, padding=1, stride=3, ceil_mode=True, count_include_pad=True), rtol=1e-5)
 
   def test_avgpool2d_padding_not_counted(self):
     shape = (32,2,111,28)
@@ -2181,6 +2238,26 @@ class TestOps(unittest.TestCase):
     for ls in (0., 0.3, 0.7, 1.):
       helper_test_op([(32,10), (32,10)], lambda x,y: torch.nn.functional.cross_entropy(x, y, label_smoothing=ls),
                                          lambda x,y: x.cross_entropy(y, label_smoothing=ls))
+
+  def test_nll_loss(self):
+    helper_test_op([(32,10), (32)], lambda x,y: torch.nn.functional.nll_loss(x, torch.clip(y,0).type(torch.long)),
+                                       lambda x,y: x.nll_loss(y.clip(0).cast(dtypes.long)), forward_only=True)
+
+  def test_nll_loss_reductions(self):
+    for r in ("mean", "sum", "none"):
+      helper_test_op([(32,10), (32)], lambda x,y: torch.nn.functional.nll_loss(x, torch.clip(y,0).type(torch.long), reduction=r),
+                                         lambda x,y: x.nll_loss(y.clip(0).cast(dtypes.long), reduction=r), forward_only=True)
+    self.helper_test_exception([(32,10), (32)], lambda x,y: torch.nn.functional.nll_loss(x, torch.clip(y,0).type(torch.long), reduction="typo"),
+                                                   lambda x,y: x.nll_loss(y.clip(0).cast(dtypes.long), reduction="typo"), expected=ValueError)
+
+  def test_nll_loss_weight(self):
+    for r in ("mean", "sum", "none"):
+      helper_test_op([(32,10), (32), (10)], lambda x,y,z: torch.nn.functional.nll_loss(x, torch.clip(y,0).type(torch.long), z, reduction=r),
+                                         lambda x,y,z: x.nll_loss(y.clip(0).cast(dtypes.long), z, reduction=r), forward_only=True)
+
+  def test_nll_loss_ignore_index(self):
+    # TODO:
+    pass
 
   def test_one_hot(self):
     data = [1, 2, 4]
