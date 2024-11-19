@@ -245,6 +245,63 @@ generate_qcom() {
   python3 -c "import tinygrad.runtime.autogen.qcom_dsp"
 }
 
+generate_pciaccess() {
+  clang2py -k cdefstum \
+    /usr/include/pciaccess.h \
+    -l /usr/lib/x86_64-linux-gnu/libpciaccess.so \
+    -o $BASE/libpciaccess.py
+}
+
+generate_amdgpu_2() {
+  # clang2py -k cdefstum \
+  #   extra/amdpci/amdgpu_ucode.h \
+  #   extra/amdpci/amdgpu_ring.h \
+  #   extra/amdpci/v11_structs.h \
+  #   extra/amdpci/amdgpu_vm.h \
+  #   -o $BASE/amdgpu_2.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/headers/navi10_ip_offset.h \
+  #   -o $BASE/amdgpu_ip_offset.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/mp_13_0_0_offset.h \
+  #   -o $BASE/amdgpu_mp_13_0_0.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/psp_gfx_if.h \
+  #   -o $BASE/amdgpu_psp_gfx_if.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/gc_11_0_0_offset.h \
+  #   -o $BASE/amdgpu_gc_11_0_0.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/headers/mmhub_3_0_0_offset.h \
+  #   extra/amdpci/headers/mmhub_3_0_0_sh_mask.h \
+  #   -o $BASE/amdgpu_mmhub_3_0_0.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/headers/nbio_4_3_0_offset.h \
+  #   extra/amdpci/headers/nbio_4_3_0_sh_mask.h \
+  #   -o $BASE/amdgpu_nbio_4_3_0.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/headers/osssys_6_0_0_offset.h \
+  #   extra/amdpci/headers/osssys_6_0_0_sh_mask.h \
+  #   -o $BASE/amdgpu_osssys_6_0_0.py
+
+  clang2py -k cdefstum \
+    extra/amdpci/headers/smu_v13_0_0_ppsmc.h \
+    extra/amdpci/headers/smu13_driver_if_v13_0_0.h \
+    extra/amdpci/headers/amdgpu_smu.h \
+    -o $BASE/amdgpu_smu_v13_0_0.py
+
+  # clang2py -k cdefstum \
+  #   extra/amdpci/headers/discovery.h \
+  #   -o $BASE/amdgpu_discovery.py
+}
+
 if [ "$1" == "opencl" ]; then generate_opencl
 elif [ "$1" == "hip" ]; then generate_hip
 elif [ "$1" == "comgr" ]; then generate_comgr
@@ -254,11 +311,13 @@ elif [ "$1" == "hsa" ]; then generate_hsa
 elif [ "$1" == "kfd" ]; then generate_kfd
 elif [ "$1" == "nv" ]; then generate_nv
 elif [ "$1" == "amd" ]; then generate_amd
+elif [ "$1" == "amdgpu_2" ]; then generate_amdgpu_2
 elif [ "$1" == "qcom" ]; then generate_qcom
 elif [ "$1" == "io_uring" ]; then generate_io_uring
 elif [ "$1" == "libc" ]; then generate_libc
 elif [ "$1" == "kgsl" ]; then generate_kgsl
 elif [ "$1" == "adreno" ]; then generate_adreno
+elif [ "$1" == "pciaccess" ]; then generate_pciaccess
 elif [ "$1" == "all" ]; then generate_opencl; generate_hip; generate_comgr; generate_cuda; generate_nvrtc; generate_hsa; generate_kfd; generate_nv; generate_amd; generate_io_uring; generate_libc
 else echo "usage: $0 <type>"
 fi
