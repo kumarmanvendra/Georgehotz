@@ -27,6 +27,8 @@ nav:
     - Runtime:
       - developer/runtime.md
       - HCQ: developer/hcq.md
+    - Tools:
+      - VIZ: developer/viz.md
   - tinybox: tinybox.md
 #- tinygrad: reference/
 
