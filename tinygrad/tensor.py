@@ -1194,7 +1194,7 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
         axis = tuple(range(first_dim, first_dim + len(big_shape)))
         # apply mask to v(broadcasted) and reduce such that if v contains repeated indices the last one remains
         vb = vb * mask
-        for dim in axis: vb = functools.reduce(lambda x,y: y.where(y, x), vb.split(1, dim))
+        for dim in axis: vb = (functools.reduce(lambda x,y: y.where(y, x), vb.split(1, dim))).cast(self.dtype)
         # reduce mask and select from v(get rid of extra dims from reduce) for each True element in mask else select from self
         ret = mask.any(axis).where(vb.squeeze(), self)
 
@@ -1239,6 +1239,28 @@ class Tensor(SimpleMathTrait):  # pylint: disable=abstract-method
     index = index.to(self.device)
     x = self.shrink(tuple((0, i) if d != dim else None for d,i in enumerate(index.shape))).unsqueeze(-1).transpose(-1, dim)
     return ((index.unsqueeze(-1) == Tensor.arange(self.shape[dim], requires_grad=False, device=self.device)) * x).sum(-1, acc_dtype=self.dtype)
+
+  def scatter(self, dim:int, index:Tensor, src:Union[Tensor, ConstType], reduce:Union[None, Literal['multiply'], Literal['add']] = None):
+    """
+    Scatters `src` values along an axis specified by `dim`.
+    apply `add` or `multiply` reduction operation with `reduce`.
+    """
+    index, dim  = index.to(self.device), self._resolve_dim(dim)
+    if not isinstance(src, Tensor): src = Tensor(src, device=self.device, dtype=self.dtype)._broadcast_to(index.shape)
+    assert index.ndim == self.ndim == src.ndim, f"self.ndim must equal index.ndim, {self.ndim=}, {index.ndim=}"
+    assert all((s >= i if d != dim else True) and srcs >= i for d,(s,i,srcs) in enumerate(zip(self.shape, index.shape, src.shape))), \
+      f"Expected {index.shape=} to be <= {self.shape=} apart from dimension {dim} and to be <= {src.shape=}"
+    mask = (index.unsqueeze(-1) == Tensor.arange(self.shape[dim], requires_grad=False, device=self.device)).transpose(-1, dim)
+    src = src.shrink(tuple((0, sh) for sh in index.shape)).unsqueeze(-1).transpose(-1, dim)
+    src = src.expand(tuple(self.size(i) if i == dim else None for i in range(src.ndim)))
+    src = src.pad(tuple((0, max(xs-ss, 0)) for ss, xs in zip(src.shape[:-1], self.shape)) + (None,))
+    mask = mask.pad(tuple((0, max(xs-ms, 0)) for ms, xs in zip(mask.shape[:-1], self.shape)) + (None,))
+    if reduce is None:
+      nan_masked = mask.where(src*mask, float("nan"))
+      masked_src = functools.reduce(lambda x,y: y.isnan().where(x, y), nan_masked.split(1, -1))
+      return (mask.any(-1).where(masked_src.squeeze(), self)).cast(self.dtype)
+    if reduce == "add": return ((mask*src).sum(-1) + self).cast(self.dtype)
+    if reduce == "multiply": return (mask.where(mask*src, 1).prod(-1) * self).cast(self.dtype)
 
   def cat(self:Tensor, *args:Tensor, dim:int=0) -> Tensor:
     """
